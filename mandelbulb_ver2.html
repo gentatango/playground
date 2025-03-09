@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>3Dマンデルブロ集合の時間変化</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background-color: #000;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const gl = canvas.getContext('webgl');
+
+    if (!gl) {
+      alert('WebGLがサポートされていません');
+    }
+
+    // キャンバスのサイズを設定
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+    }
+
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // 頂点シェーダー
+    const vertexShaderSource = `
+      attribute vec2 a_position;
+      void main() {
+        gl_Position = vec4(a_position, 0.0, 1.0);
+      }
+    `;
+
+    // フラグメントシェーダー
+    const fragmentShaderSource = `
+      precision highp float;
+
+      uniform vec2 u_resolution;
+      uniform float u_time;
+
+      // 3Dマンデルブロ集合の計算
+      vec4 mandelbulb(vec3 pos) {
+        vec3 z = pos;
+        float dr = 1.0;
+        float r = 0.0;
+
+        // 時間によって変化するパラメータ
+        float power = 8.0 + 1.5 * sin(u_time * 0.15);
+        float bailout = 4.0;
+        int iterations = int(40.0 + 20.0 * sin(u_time * 0.08));
+
+        int escapeIter = 0;
+
+        for (int i = 0; i < 100; i++) {
+          if (i >= iterations) break;
+
+          r = length(z);
+
+          if (r > bailout) {
+            escapeIter = i;
+            break;
+          }
+
+          // 球面座標への変換
+          float theta = acos(z.z / r);
+          float phi = atan(z.y, z.x);
+          dr = pow(r, power - 1.0) * power * dr + 1.0;
+
+          // 高次元への拡張
+          float zr = pow(r, power);
+          theta = theta * power;
+          phi = phi * power;
+
+          // 直交座標への戻し
+          z = zr * vec3(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta));
+          z += pos;
+        }
+
+        // 距離推定値
+        float dist = 0.5 * log(r) * r / dr;
+
+        // 位置情報に基づいた複数色の生成（x,y,z座標を反映）
+        vec3 baseColor = vec3(
+          0.5 + 0.5 * sin(pos.x * 2.0 + u_time * 0.2),
+          0.5 + 0.5 * sin(pos.y * 2.0 + u_time * 0.3),
+          0.5 + 0.5 * sin(pos.z * 2.0 + u_time * 0.1)
+        );
+
+        // 繰り返し回数に基づく色のバリエーション
+        float iterFactor = float(escapeIter) / float(iterations);
+        vec3 iterColor = vec3(
+          0.7 + 0.3 * sin(iterFactor * 12.0 + u_time * 0.2),
+          0.7 + 0.3 * sin(iterFactor * 8.0 + u_time * 0.1),
+          0.7 + 0.3 * sin(iterFactor * 10.0 + u_time * 0.3)
+        );
+
+        // 複数の色要素を混合
+        vec3 color = mix(baseColor, iterColor, 0.7);
+
+        return vec4(color, dist);
+      }
+
+      // レイマーチング
+      vec4 raymarch(vec3 ro, vec3 rd) {
+        float t = 0.0;
+        float tmax = 20.0;
+        vec3 pos;
+        vec4 result;
+
+        // レイマーチングの精度を向上
+        float minStep = 0.005; // 最小ステップ
+
+        for (int i = 0; i < 120; i++) { // 繰り返し回数を増加
+          pos = ro + rd * t;
+          result = mandelbulb(pos);
+
+          // より細かいディテールを捉えるための条件調整
+          if (result.w < 0.0008 || t > tmax) break;
+
+          // 遠い場所では大きなステップ、近づくと細かいステップにする
+          t += max(result.w * 0.5, minStep);
+        }
+
+        if (t > tmax) {
+          return vec4(0.0, 0.0, 0.0, 1.0); // 背景色（黒）
+        }
+
+        // 複数の光源
+        vec3 light1 = vec3(
+          3.0 * sin(u_time * 0.2),
+          3.0 * cos(u_time * 0.3),
+          2.0 + sin(u_time * 0.1)
+        );
+
+        vec3 light2 = vec3(
+          -2.0 * cos(u_time * 0.15),
+          -2.0 * sin(u_time * 0.25),
+          3.0 + cos(u_time * 0.1)
+        );
+
+        // 法線の計算（精度を上げる）
+        float eps = 0.0005; // より細かいイプシロン値
+        vec3 normal = normalize(vec3(
+          mandelbulb(vec3(pos.x + eps, pos.y, pos.z)).w - mandelbulb(vec3(pos.x - eps, pos.y, pos.z)).w,
+          mandelbulb(vec3(pos.x, pos.y + eps, pos.z)).w - mandelbulb(vec3(pos.x, pos.y - eps, pos.z)).w,
+          mandelbulb(vec3(pos.x, pos.y, pos.z + eps)).w - mandelbulb(vec3(pos.x, pos.y, pos.z - eps)).w
+        ));
+
+        // ライティング計算の強化
+        vec3 lightDir1 = normalize(light1 - pos);
+        vec3 lightDir2 = normalize(light2 - pos);
+
+        float diff1 = max(dot(normal, lightDir1), 0.0);
+        float diff2 = max(dot(normal, lightDir2), 0.0);
+
+        float spec1 = pow(max(dot(reflect(-lightDir1, normal), -rd), 0.0), 32.0); // 鋭さを増加
+        float spec2 = pow(max(dot(reflect(-lightDir2, normal), -rd), 0.0), 32.0);
+
+        // 環境光を調整
+        float amb = 0.15;
+
+        // リムライト（エッジ強調）を追加
+        float rim = pow(1.0 - abs(dot(normal, -rd)), 4.0);
+
+        // 色に光源の効果を適用
+        vec3 finalColor = result.rgb * (amb + diff1 * 0.6 + diff2 * 0.4) +
+                         vec3(1.0, 0.9, 0.8) * spec1 * 0.6 +
+                         vec3(0.8, 0.9, 1.0) * spec2 * 0.4 +
+                         vec3(0.5, 0.7, 1.0) * rim * 0.3;
+
+        // コントラスト調整でディテールを強調
+        finalColor = pow(finalColor, vec3(0.9));
+
+        return vec4(finalColor, 1.0);
+      }
+
+      void main() {
+        vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / min(u_resolution.y, u_resolution.x);
+
+        // カメラの位置（3軸全てで回転）
+        float camDist = 2.2 + 0.4 * sin(u_time * 0.1);
+        vec3 cameraPos = vec3(
+          camDist * sin(u_time * 0.1) * cos(u_time * 0.13),
+          camDist * cos(u_time * 0.1) * cos(u_time * 0.13),
+          camDist * sin(u_time * 0.13) // Z軸回転を追加
+        );
+
+        // 視点座標
+        vec3 target = vec3(0.0, 0.0, 0.0);
+        vec3 cameraForward = normalize(target - cameraPos);
+        vec3 cameraRight = normalize(cross(vec3(0.0, 1.0, 0.0), cameraForward));
+        vec3 cameraUp = normalize(cross(cameraForward, cameraRight));
+
+        // レイの方向
+        vec3 rayDirection = normalize(
+          cameraForward +
+          uv.x * cameraRight +
+          uv.y * cameraUp
+        );
+
+        // レイマーチング
+        vec4 color = raymarch(cameraPos, rayDirection);
+
+        gl_FragColor = color;
+      }
+    `;
+
+    // シェーダーのコンパイル
+    function compileShader(gl, source, type) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error('シェーダーコンパイルエラー:', gl.getShaderInfoLog(shader));
+        gl.deleteShader(shader);
+        return null;
+      }
+
+      return shader;
+    }
+
+    // シェーダープログラムの作成
+    function createProgram(gl, vertexShader, fragmentShader) {
+      const program = gl.createProgram();
+      gl.attachShader(program, vertexShader);
+      gl.attachShader(program, fragmentShader);
+      gl.linkProgram(program);
+
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error('プログラムリンクエラー:', gl.getProgramInfoLog(program));
+        return null;
+      }
+
+      return program;
+    }
+
+    // シェーダーのコンパイルとプログラムの作成
+    const vertexShader = compileShader(gl, vertexShaderSource, gl.VERTEX_SHADER);
+    const fragmentShader = compileShader(gl, fragmentShaderSource, gl.FRAGMENT_SHADER);
+    const program = createProgram(gl, vertexShader, fragmentShader);
+
+    // 頂点バッファの作成（画面全体を覆う四角形）
+    const positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([
+        -1.0, -1.0,
+         1.0, -1.0,
+        -1.0,  1.0,
+        -1.0,  1.0,
+         1.0, -1.0,
+         1.0,  1.0
+      ]),
+      gl.STATIC_DRAW
+    );
+
+    // 属性とユニフォームの位置を取得
+    const positionAttributeLocation = gl.getAttribLocation(program, 'a_position');
+    const resolutionUniformLocation = gl.getUniformLocation(program, 'u_resolution');
+    const timeUniformLocation = gl.getUniformLocation(program, 'u_time');
+
+    // 属性の設定
+    gl.enableVertexAttribArray(positionAttributeLocation);
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
+
+    // アニメーションループ
+    function render(time) {
+      time *= 0.001; // ミリ秒を秒に変換
+
+      gl.clearColor(0.0, 0.0, 0.0, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      gl.useProgram(program);
+
+      // ユニフォームの設定
+      gl.uniform2f(resolutionUniformLocation, canvas.width, canvas.height);
+      gl.uniform1f(timeUniformLocation, time);
+
+      // 描画
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      requestAnimationFrame(render);
+    }
+
+    requestAnimationFrame(render);
+  </script>
+</body>
+</html>
